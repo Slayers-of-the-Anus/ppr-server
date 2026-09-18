@@ -1,0 +1,14 @@
+<!doctype html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PhonePilot — camera sender</title><link rel="stylesheet" href="/assets/styles.css"></head><body>
+<main class="sender-shell"><section class="sender-card">
+  <div class="brand-row"><span class="brand-mark">RR</span><div><div class="eyebrow">PROTOCOL TEST</div><h1>Камера телефона</h1></div></div>
+  <p class="muted">Тестовый sender без Android-приложения. Телефон захватывает камеру в браузере и отправляет живой WebRTC-видеотрек в админку.</p>
+  <div class="sender-preview"><video id="preview" autoplay playsinline muted></video></div>
+  <div class="sender-stats"><span id="secure">secure: —</span><span id="cameraState">camera: off</span><span id="socketState">server: off</span><span id="rtcState">viewer: idle</span></div>
+  <div class="form-stack">
+    <div class="field"><label>Camera ID</label><input id="cameraId" value="phone_01"></div>
+    <div class="field"><label>Name</label><input id="cameraName" value="Phone Camera"></div>
+  </div>
+  <div class="row-buttons"><button id="start" class="primary-button">START CAMERA</button><button id="stop" class="ghost-button" disabled>STOP</button></div>
+  <div id="error" class="error-text"></div>
+  <p class="muted">Для теста по USB открой эту страницу на телефоне как <strong>http://localhost:8080/camera-test</strong> после команды <strong>adb reverse tcp:8080 tcp:8080</strong>.</p>
+</section></main><script src="/assets/camera-test.js" defer></script></body></html>

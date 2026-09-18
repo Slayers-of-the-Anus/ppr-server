@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PhonePilot Camera</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=0.8.0" />
+  <link rel="stylesheet" href="/assets/webrtc.css?v=0.8.0" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand-row">
+    <span class="brand-mark small">RR</span>
+    <div><div class="eyebrow">ROBOROUTE</div><h1>Камера телефона</h1></div>
+  </div>
+  <div class="topbar-actions">
+    <span id="currentUser" class="soft-badge">—</span>
+    <span id="serverBadge" class="status-badge offline">Server: offline</span>
+    <button id="logoutButton" class="ghost-button" type="button">Выйти</button>
+  </div>
+</header>
+
+<main class="admin-layout camera-only-layout">
+  <section class="fleet-panel panel">
+    <div class="panel-heading">
+      <div><div class="eyebrow">CAMERAS</div><h2>Телефоны</h2></div>
+      <span id="cameraCounter" class="soft-badge">0 online</span>
+    </div>
+    <div id="cameraGrid" class="robot-grid"></div>
+    <div id="cameraEmpty" class="empty-state">
+      <strong>Камера не подключена</strong>
+      <span>Откройте Android-приложение и подключите его к этому серверу.</span>
+    </div>
+  </section>
+
+  <section class="camera-panel panel">
+    <div class="panel-heading">
+      <div><div class="eyebrow">LOW LATENCY WEBRTC</div><h2 id="cameraTitle">Выберите телефон</h2></div>
+      <div class="camera-heading-right"><span id="cameraViewers" class="soft-badge">Viewers: —</span><span id="videoBadge" class="status-badge offline">Video: idle</span></div>
+    </div>
+    <div class="camera-controls row-buttons">
+      <button id="reconnectVideoButton" class="primary-button" type="button" disabled>RECONNECT VIDEO</button>
+      <button id="stopVideoButton" class="ghost-button" type="button" disabled>STOP VIDEO</button>
+    </div>
+    <div class="camera-controls servo-controls">
+      <span class="eyebrow">СЕРВО · ПОВОРОТ</span>
+      <div class="servo-row">
+        <button id="servoLeftButton" class="ghost-button servo-button" type="button" disabled title="Повернуть влево — клавиша Q или ←">◀ ВЛЕВО <kbd>Q</kbd></button>
+        <button id="servoRightButton" class="ghost-button servo-button" type="button" disabled title="Повернуть вправо — клавиша E или →"><kbd>E</kbd> ВПРАВО ▶</button>
+      </div>
+      <div class="servo-detail-row">
+        <label class="servo-angle-input">Кут:
+          <input id="servoAngleInput" type="number" min="0" max="180" step="1" inputmode="numeric" placeholder="95°" disabled />
+        </label>
+        <span id="servoAngle" class="soft-badge">Поточний кут: —</span>
+        <span id="servoConnection" class="status-badge offline">ESP32: disconnected</span>
+      </div>
+    </div>
+    <div class="main-camera-stage">
+      <video id="mainVideo" autoplay playsinline muted></video>
+      <div id="placeholder" class="camera-placeholder">
+        <strong>Нет видеопотока</strong>
+        <span>Видео идёт через WebRTC. Первый зритель получает поток с телефона и может ретранслировать его остальным зрителям; Node.js передаёт только signaling.</span>
+      </div>
+      <div id="videoStats" class="video-stats" hidden>
+        <span id="statResolution">—</span>
+        <span id="statFps">— FPS</span>
+        <span id="statBitrate">— Mbps</span>
+        <span id="statRtt">RTT — ms</span>
+        <span id="statJitter">Jitter — ms</span>
+        <span id="statLoss">Loss —</span>
+        <span id="statRoute">Route —</span>
+      </div>
+    </div>
+    <details class="metric-help">
+      <summary>Что означают FPS, Bitrate, RTT, Jitter, Loss и Route?</summary>
+      <div class="metric-help-grid">
+        <p><strong>FPS</strong> — сколько кадров видео приходит за секунду. 30 FPS — плавно; 15 FPS уже заметно дёргается.</p>
+        <p><strong>Bitrate</strong> — скорость самого видеопотока в Mbps. Чем выше, тем больше деталей и расход трафика.</p>
+        <p><strong>RTT</strong> — сетевой round-trip time текущего WebRTC-участка. Для SOURCE это браузер↔телефон; для RELAY — браузер↔source-браузер. Это не полная задержка «камера→экран».</p>
+        <p><strong>Jitter</strong> — насколько нестабильно по времени приходят пакеты. Высокий jitter даёт рывки даже при хорошем среднем ping.</p>
+        <p><strong>Loss</strong> — процент потерянных пакетов. Для видео желательно около 0%; несколько процентов уже могут портить плавность.</p>
+        <p><strong>Route</strong> — ICE-маршрут текущего участка: <code>host</code> — локальный адрес, <code>srflx</code> — прямой маршрут через NAT/STUN, <code>relay</code> — через TURN. У RELAY-зрителя поток идёт через source-браузер.</p>
+      </div>
+    </details>
+    <p class="safety-note">RTT — это сетевой round-trip time, а не точная «камера→экран» задержка. Для glass-to-glass задержки нужен отдельный тест таймером.</p>
+  </section>
+</main>
+<div id="toast" class="toast" hidden></div>
+<script src="/assets/admin.js?v=0.8.0" defer></script>
+</body>
+</html>

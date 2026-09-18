@@ -1,0 +1,7 @@
+.env
+bin/
+.gocache/
+*.exe
+*.exe~
+*.log
+.DS_Store
