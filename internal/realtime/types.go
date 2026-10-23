@@ -34,6 +34,11 @@ type ServoState struct {
 	LastCommandAt time.Time
 }
 
+type DriveState struct {
+	Available bool
+	Direction string
+}
+
 type Camera struct {
 	ID                    string
 	Name                  string
@@ -47,6 +52,17 @@ type Camera struct {
 	IntentionalDisconnect bool
 	SourceSessionID       string
 	Servo                 ServoState
+	Drive                 DriveState
+	DriveOwner            *AdminClient
+	LastDriveAt           time.Time
+	NetworkPath           NetworkPath
+	LANVerified           bool
+}
+
+type NetworkPath struct {
+	Path      string `json:"path"`
+	Verified  bool   `json:"verified"`
+	ChangedAt int64  `json:"changedAt"`
 }
 
 type ViewerSession struct {

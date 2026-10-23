@@ -38,10 +38,13 @@ func (h *Hub) Close() {
 		a.Conn.Close(ws.CloseGoingAway, "server-shutdown")
 	}
 	for _, c := range h.cameras {
+		h.stopDriveLocked(c)
 		if c.DisconnectTimer != nil {
 			c.DisconnectTimer.Stop()
 		}
-		c.Conn.Close(ws.CloseGoingAway, "server-shutdown")
+		if c.Conn != nil {
+			c.Conn.Close(ws.CloseGoingAway, "server-shutdown")
+		}
 	}
 }
 
@@ -98,6 +101,8 @@ func (h *Hub) HandleAdmin(conn *WSConn, identity AdminIdentity) {
 			h.startWatchingLocked(admin, msg)
 		case "servo_command":
 			h.handleServoCommandLocked(admin, msg)
+		case "drive_command":
+			h.handleDriveCommandLocked(admin, msg)
 		case "webrtc_answer", "webrtc_ice", "webrtc_stop", "webrtc_state", "webrtc_media":
 			h.relayAdminMessageLocked(admin, msg)
 		case "relay_offer", "relay_answer", "relay_ice", "relay_error":
@@ -108,6 +113,11 @@ func (h *Hub) HandleAdmin(conn *WSConn, identity AdminIdentity) {
 
 	h.mu.Lock()
 	delete(h.admins, admin)
+	for _, c := range h.cameras {
+		if c.DriveOwner == admin {
+			h.stopDriveLocked(c)
+		}
+	}
 	affected := map[string]struct{}{}
 	for _, s := range h.sessions {
 		if s.Admin != admin {
@@ -127,17 +137,14 @@ func (h *Hub) HandleAdmin(conn *WSConn, identity AdminIdentity) {
 	conn.Close(ws.CloseNormalClosure, "closed")
 }
 
-func (h *Hub) HandleCamera(conn *WSConn, id, name string) {
+func (h *Hub) HandleCamera(conn *WSConn, id, name string, lanVerified bool) {
 	conn.Underlying().SetReadLimit(256 * 1024)
 	var camera *Camera
 
 	h.mu.Lock()
 	previous := h.cameras[id]
 	wasInGrace := previous != nil && previous.DisconnectTimer != nil
-	if previous != nil && previous.DisconnectTimer != nil {
-		previous.DisconnectTimer.Stop()
-		previous.DisconnectTimer = nil
-	}
+	wasIntentional := previous != nil && previous.IntentionalDisconnect
 	if previous != nil && previous.Conn != nil && !previous.Conn.IsClosed() && previous.Conn != conn {
 		stale := !previous.Conn.MarkForPing() || time.Since(previous.LastSeen) > 20*time.Second
 		previous.Conn.MarkAlive()
@@ -149,6 +156,10 @@ func (h *Hub) HandleCamera(conn *WSConn, id, name string) {
 		}
 		previous.Conn.Close(ws.CloseNormalClosure, "replaced-stale-connection")
 	}
+	if previous != nil && previous.DisconnectTimer != nil {
+		previous.DisconnectTimer.Stop()
+		previous.DisconnectTimer = nil
+	}
 	if previous == nil {
 		camera = &Camera{ID: id, Name: name, LastSeen: time.Now(), Servo: h.defaultServoStateLocked()}
 		h.cameras[id] = camera
@@ -157,10 +168,14 @@ func (h *Hub) HandleCamera(conn *WSConn, id, name string) {
 	}
 	camera.Name = name
 	camera.Conn = conn
+	camera.Drive = DriveState{Direction: "stop"}
+	camera.DriveOwner = nil
+	camera.LANVerified = lanVerified
+	camera.NetworkPath = NetworkPath{Path: "unknown", ChangedAt: time.Now().UnixMilli()}
 	camera.LastSeen = time.Now()
 	camera.DisconnectTimer = nil
 	camera.IntentionalDisconnect = false
-	if !wasInGrace {
+	if previous == nil || (wasIntentional && !wasInGrace) {
 		camera.Available = false
 		h.applyServoErrorLocked(camera)
 	}
@@ -191,6 +206,15 @@ func (h *Hub) HandleCamera(conn *WSConn, id, name string) {
 		}
 		camera.LastSeen = time.Now()
 		switch str(msg["type"]) {
+		case "network_state":
+			if intNumber(msg["v"]) == 2 {
+				path := classifyPath(lanVerified, str(msg["transport"]))
+				if camera.NetworkPath.Path != path {
+					camera.NetworkPath = NetworkPath{Path: path, Verified: path == "lan_wifi", ChangedAt: time.Now().UnixMilli()}
+					h.broadcastListLocked()
+				}
+				conn.WriteJSON(Message{"type": "network_path", "v": 2, "path": path, "verified": path == "lan_wifi"})
+			}
 		case "camera_status":
 			camera.Available = boolean(msg["available"])
 			camera.Width = intNumber(msg["width"])
@@ -204,6 +228,8 @@ func (h *Hub) HandleCamera(conn *WSConn, id, name string) {
 				h.promoteRelayToSourceLocked(id)
 			}
 		case "camera_disconnect":
+			h.stopDriveLocked(camera)
+			camera.Drive = DriveState{Direction: "stop"}
 			camera.IntentionalDisconnect = true
 			camera.Available = false
 			h.applyServoErrorLocked(camera)
@@ -212,6 +238,13 @@ func (h *Hub) HandleCamera(conn *WSConn, id, name string) {
 		case "servo_state":
 			h.applyServoStateLocked(camera, msg)
 			h.broadcastServoStateLocked(camera)
+		case "drive_state":
+			h.applyDriveStateLocked(camera, msg)
+		case "drive_error":
+			h.stopDriveLocked(camera)
+			camera.Drive = DriveState{Direction: "stop"}
+			h.broadcastDriveStateLocked(camera)
+			h.broadcastLocked(Message{"type": "drive_error", "cameraId": id, "code": trunc(str(msg["code"]), 80), "detail": trunc(str(msg["detail"]), 300)})
 		case "servo_error":
 			h.applyServoErrorLocked(camera)
 			code := trunc(strDefault(msg["code"], "SERVO_ERROR"), 80)
@@ -228,6 +261,9 @@ func (h *Hub) HandleCamera(conn *WSConn, id, name string) {
 	h.mu.Lock()
 	if camera.Conn == conn {
 		camera.Conn = nil
+		camera.Drive = DriveState{Direction: "stop"}
+		camera.DriveOwner = nil
+		camera.NetworkPath = NetworkPath{Path: "offline", ChangedAt: time.Now().UnixMilli()}
 		camera.LastSeen = time.Now()
 		if camera.IntentionalDisconnect {
 			camera.Available = false
@@ -254,6 +290,23 @@ func (h *Hub) HandleCamera(conn *WSConn, id, name string) {
 	}
 	h.mu.Unlock()
 	conn.Close(ws.CloseNormalClosure, "closed")
+}
+
+func classifyPath(lanVerified bool, transport string) string {
+	if lanVerified {
+		if transport == "wifi" {
+			return "lan_wifi"
+		}
+		return "unknown"
+	}
+	switch transport {
+	case "cellular":
+		return "mobile"
+	case "wifi":
+		return "remote_wifi"
+	default:
+		return "unknown"
+	}
 }
 
 func (h *Hub) startWatchingLocked(admin *AdminClient, msg Message) {
@@ -811,7 +864,9 @@ func (h *Hub) cameraStateLocked(c *Camera) Message {
 	}
 	return Message{
 		"id": c.ID, "name": c.Name, "online": signalingOnline || inGrace, "signaling": signaling, "available": c.Available,
-		"width": width, "height": height, "fps": fps, "lastSeen": c.LastSeen.UnixMilli(), "viewers": viewers, "viewerCount": len(viewers),
+		"networkPath": c.NetworkPath,
+		"drive":       h.publicDriveStateLocked(c, signalingOnline),
+		"width":       width, "height": height, "fps": fps, "lastSeen": c.LastSeen.UnixMilli(), "viewers": viewers, "viewerCount": len(viewers),
 		"maxViewers": h.cfg.MaxViewersPerCamera, "sourceUsername": sourceUsername(h.sourceForCameraLocked(c.ID)), "servo": h.publicServoStateLocked(c, signalingOnline),
 	}
 }
@@ -830,6 +885,15 @@ func (h *Hub) cameraListLocked() []Message {
 		return str(out[i]["name"]) < str(out[j]["name"])
 	})
 	return out
+}
+
+func (h *Hub) CameraSnapshot(id string) Message {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if c := h.cameras[id]; c != nil {
+		return h.cameraStateLocked(c)
+	}
+	return nil
 }
 
 func (h *Hub) publishViewerListLocked(cameraID string) {

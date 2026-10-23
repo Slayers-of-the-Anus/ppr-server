@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>PhonePilot Camera</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=0.8.0" />
+  <link rel="stylesheet" href="/assets/styles.css?v=0.9.0" />
   <link rel="stylesheet" href="/assets/webrtc.css?v=0.8.0" />
 </head>
 <body>
@@ -41,6 +41,18 @@
     <div class="camera-controls row-buttons">
       <button id="reconnectVideoButton" class="primary-button" type="button" disabled>RECONNECT VIDEO</button>
       <button id="stopVideoButton" class="ghost-button" type="button" disabled>STOP VIDEO</button>
+    </div>
+    <div class="camera-controls drive-controls">
+      <span class="eyebrow">РУХ РОБОТА</span>
+      <div class="servo-row">
+        <button id="driveForwardButton" class="ghost-button servo-button drive-button" type="button" disabled>▲ ВПЕРЕД <kbd>W / ↑</kbd></button>
+        <button id="driveStopButton" class="ghost-button servo-button" type="button" disabled>■ СТОП</button>
+        <button id="driveBackwardButton" class="ghost-button servo-button drive-button" type="button" disabled>▼ НАЗАД <kbd>S / ↓</kbd></button>
+      </div>
+      <div class="servo-detail-row">
+        <span id="driveState" class="status-badge offline">Мотори: недоступні</span>
+        <span class="drive-hint">Утримуйте кнопку для руху; відпустіть, щоб зупинитися.</span>
+      </div>
     </div>
     <div class="camera-controls servo-controls">
       <span class="eyebrow">СЕРВО · ПОВОРОТ</span>
@@ -87,6 +99,6 @@
   </section>
 </main>
 <div id="toast" class="toast" hidden></div>
-<script src="/assets/admin.js?v=0.8.0" defer></script>
+<script src="/assets/admin.js?v=0.9.0" defer></script>
 </body>
 </html>

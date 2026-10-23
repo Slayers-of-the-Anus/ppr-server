@@ -9,6 +9,8 @@
     currentUser: $('currentUser'),
     servoLeft: $('servoLeftButton'), servoRight: $('servoRightButton'),
     servoAngle: $('servoAngle'), servoAngleInput: $('servoAngleInput'), servoConnection: $('servoConnection'),
+    driveForward: $('driveForwardButton'), driveBackward: $('driveBackwardButton'),
+    driveStop: $('driveStopButton'), driveState: $('driveState'),
   };
 
   const storedViewerId = sessionStorage.getItem('robrouteViewerId');
@@ -23,6 +25,7 @@
     statsTimer: null, lastBytes: null, lastAt: null, lastFramesDecoded: null,
     lastFrameProgressAt: null, mediaState: 'idle', stallRestarting: false,
     pendingCriticalSignals: new Map(), pendingLocalIce: [],
+    driveHold: null, driveTimer: null,
   };
   sessionStorage.setItem('robrouteViewerId', state.viewerId);
 
@@ -77,6 +80,7 @@
     };
     ws.onclose = () => {
       if (state.ws !== ws || generation !== state.wsGeneration) return;
+      stopDrive();
       state.ws = null;
       setServer(false);
       // Media stays alive during signaling grace; do not close any PeerConnections here.
@@ -109,6 +113,16 @@
       }
       if (msg.type === 'servo_state') {
         applyServoState(msg.cameraId, msg.servo);
+        return;
+      }
+      if (msg.type === 'drive_state') {
+        const camera = state.cameras.find(c => c.id === msg.cameraId);
+        if (camera) camera.drive = msg.drive;
+        if (msg.cameraId === state.selected) renderDrive(camera);
+        return;
+      }
+      if (msg.type === 'drive_error') {
+        if (msg.cameraId === state.selected) { stopDrive(); showToast(`Мотори: ${msg.code || 'ERROR'}${msg.detail ? `: ${msg.detail}` : ''}`); }
         return;
       }
       if (msg.type === 'servo_error') {
@@ -241,7 +255,9 @@
       const viewers = (camera.viewers || []).map(v => `${v.username}${v.role === 'source' ? ' ★' : ''}`);
       const viewerText = `${camera.viewerCount || 0}/${camera.maxViewers || state.maxViewersPerCamera} viewers${viewers.length ? ` · ${viewers.join(', ')}` : ''}`;
       const signaling = camera.signaling === 'grace' ? ' · SIGNALING RECONNECT' : '';
-      btn.innerHTML = `<strong>${escapeHtml(camera.name || camera.id)}</strong><span>${camera.online && camera.available ? `WEBRTC READY${signaling}` : 'OFFLINE'}</span><small>${camera.width || '—'}×${camera.height || '—'} @ ${camera.fps || '—'} FPS</small><small>${escapeHtml(viewerText)}</small>`;
+      const pathLabels = { lan_wifi: 'Спільна локальна Wi‑Fi', mobile: 'Мобільна мережа', remote_wifi: 'Інша Wi‑Fi', unknown: 'Тип мережі невідомий', offline: 'Немає з’єднання' };
+      const path = camera.networkPath?.path || 'offline';
+      btn.innerHTML = `<strong>${escapeHtml(camera.name || camera.id)}</strong><span>${camera.online && camera.available ? `WEBRTC READY${signaling}` : 'OFFLINE'}</span><small class="network-path">${pathLabels[path] || pathLabels.unknown}</small><small>${camera.width || '—'}×${camera.height || '—'} @ ${camera.fps || '—'} FPS</small><small>${escapeHtml(viewerText)}</small>`;
       btn.onclick = () => selectCamera(camera.id);
       return btn;
     }));
@@ -318,9 +334,66 @@
     if (els.reconnect) els.reconnect.disabled = !hasSelection || !selectedCameraReady() || state.ws?.readyState !== WebSocket.OPEN;
     if (els.stop) els.stop.disabled = !hasSelection || !state.sessionId;
     renderServo(selectedCamera());
+    renderDrive(selectedCamera());
+  }
+
+  function renderDrive(camera) {
+    const available = Boolean(camera?.online && camera.drive?.available && state.ws?.readyState === WebSocket.OPEN);
+    if (!available && state.driveHold) stopDrive();
+    for (const button of [els.driveForward, els.driveBackward]) if (button) button.disabled = !available;
+    if (els.driveStop) els.driveStop.disabled = !camera?.online || state.ws?.readyState !== WebSocket.OPEN;
+    if (els.driveState) {
+      const labels = { forward: 'вперед', backward: 'назад', stop: 'зупинено' };
+      els.driveState.textContent = available ? `Мотори: ${labels[camera.drive.direction] || 'зупинено'}` : 'Мотори: недоступні';
+      els.driveState.className = `status-badge ${available ? 'online' : 'offline'}`;
+    }
+  }
+  function sendDrive(cameraId, action) {
+    // Motion must never enter the signaling reconnect queue.
+    if (!cameraId || state.ws?.readyState !== WebSocket.OPEN) return false;
+    if (action !== 'stop' && state.ws.bufferedAmount > 1024) return false;
+    try { state.ws.send(JSON.stringify({ type: 'drive_command', cameraId, action })); return true; } catch { return false; }
+  }
+  function startDrive(action, source) {
+    if (state.driveHold || document.hidden) return;
+    const camera = selectedCamera();
+    if (!camera?.online || !camera.drive?.available || !sendDrive(camera.id, action)) return;
+    state.driveHold = { cameraId: camera.id, action, source };
+    (action === 'forward' ? els.driveForward : els.driveBackward)?.classList.add('is-held');
+    state.driveTimer = setInterval(() => {
+      const hold = state.driveHold;
+      if (!hold || !sendDrive(hold.cameraId, hold.action)) stopDrive();
+    }, 150);
+  }
+  function stopDrive(source = null) {
+    const hold = state.driveHold;
+    if (source && hold?.source !== source) return;
+    clearInterval(state.driveTimer); state.driveTimer = null; state.driveHold = null;
+    els.driveForward?.classList.remove('is-held'); els.driveBackward?.classList.remove('is-held');
+    if (hold) sendDrive(hold.cameraId, 'stop');
+  }
+  function bindDriveButton(button, action) {
+    button?.addEventListener('pointerdown', event => {
+      if (event.button !== 0) return;
+      event.preventDefault(); button.setPointerCapture(event.pointerId);
+      startDrive(action, `pointer:${event.pointerId}`);
+    });
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+      button?.addEventListener(type, event => stopDrive(`pointer:${event.pointerId}`));
+    }
+    button?.addEventListener('contextmenu', event => event.preventDefault());
+    button?.addEventListener('keydown', event => {
+      if (event.code === 'Space' || event.code === 'Enter') {
+        event.preventDefault(); if (!event.repeat) startDrive(action, event.code);
+      }
+    });
+    button?.addEventListener('keyup', event => {
+      if (event.code === 'Space' || event.code === 'Enter') { event.preventDefault(); stopDrive(event.code); }
+    });
   }
 
   function selectCamera(id) {
+    stopDrive();
     const same = state.selected === id;
     state.selected = id;
     state.manualStopped = false;
@@ -694,6 +767,19 @@
   els.stop?.addEventListener('click', stopVideo);
   els.servoLeft?.addEventListener('click', () => sendServo('left'));
   els.servoRight?.addEventListener('click', () => sendServo('right'));
+  bindDriveButton(els.driveForward, 'forward');
+  bindDriveButton(els.driveBackward, 'backward');
+  els.driveStop?.addEventListener('click', () => { stopDrive(); sendDrive(state.selected, 'stop'); });
+  document.addEventListener('keydown', event => {
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.target?.matches('input,select,textarea') || event.target?.isContentEditable) return;
+    const action = { KeyW: 'forward', ArrowUp: 'forward', KeyS: 'backward', ArrowDown: 'backward' }[event.code];
+    if (action) { event.preventDefault(); if (!event.repeat) startDrive(action, event.code); }
+    else if (event.code === 'Space' || event.code === 'Escape') { stopDrive(); sendDrive(state.selected, 'stop'); }
+  });
+  document.addEventListener('keyup', event => stopDrive(event.code));
+  window.addEventListener('blur', () => stopDrive());
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopDrive(); });
   els.servoAngleInput?.addEventListener('keydown', event => {
     if (event.key === 'Enter') { event.preventDefault(); sendAbsoluteServoAngle(); }
   });
@@ -709,10 +795,12 @@
     else if (code === 'KeyE' || event.key === 'ArrowRight') { event.preventDefault(); sendServo('right'); }
   });
   els.logout.addEventListener('click', async () => {
+    stopDrive();
     state.manualStopped = true; cancelRtcRetry(); stopCurrentSession(true, false);
     await fetch('/api/logout', { method: 'POST' }); location.assign('/login');
   });
   window.addEventListener('beforeunload', () => {
+    stopDrive();
     const sid = state.sessionId;
     if (sid && state.ws?.readyState === WebSocket.OPEN) {
       try { state.ws.send(JSON.stringify({ type: 'webrtc_stop', sessionId: sid, reason: 'viewer-page-closed' })); } catch { }

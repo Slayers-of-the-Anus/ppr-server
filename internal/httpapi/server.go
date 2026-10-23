@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"io/fs"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -37,6 +41,9 @@ type Server struct {
 	tokens   map[string]tokenRecord
 }
 
+type lanContextKey struct{}
+type lanContext struct{ subnet *net.IPNet }
+
 func New(cfg config.Config, hub *realtime.Hub) (*Server, error) {
 	web, err := fs.Sub(webassets.FS, "web")
 	if err != nil {
@@ -53,6 +60,13 @@ func New(cfg config.Config, hub *realtime.Hub) (*Server, error) {
 
 func (s *Server) Handler() http.Handler { return s.securityHeaders(s.mux) }
 
+func (s *Server) LANHandler(subnet *net.IPNet) http.Handler {
+	base := s.Handler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), lanContextKey{}, lanContext{subnet})))
+	})
+}
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /", s.handleRoot)
 	s.mux.HandleFunc("GET /login", s.handleLoginPage)
@@ -65,9 +79,43 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/webrtc-config", s.requireAdmin(s.handleWebRTCConfig))
 	s.mux.HandleFunc("POST /api/ws-token", s.requireAdmin(s.handleWSToken))
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, map[string]any{"ok": true}) })
+	s.mux.HandleFunc("GET /api/network/info", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"v": 2, "serverId": s.cfg.ServerID})
+	})
+	s.mux.HandleFunc("GET /api/network/lan-probe", s.handleLANProbe)
 	s.mux.HandleFunc("GET /ws/admin", s.handleAdminWS)
 	s.mux.HandleFunc("GET /ws/camera", s.handleCameraWS)
 	s.mux.HandleFunc("GET /ws/robot", s.handleCameraWS)
+}
+
+func (s *Server) handleLANProbe(w http.ResponseWriter, r *http.Request) {
+	if !verifiedLANPeer(r) {
+		http.NotFound(w, r)
+		return
+	}
+	nonce := r.URL.Query().Get("nonce")
+	if len(nonce) < 16 || len(nonce) > 128 {
+		http.Error(w, "invalid nonce", http.StatusBadRequest)
+		return
+	}
+	if _, err := base64.RawURLEncoding.DecodeString(nonce); err != nil || strings.Contains(nonce, "=") {
+		http.Error(w, "invalid nonce", http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"v": 2, "serverId": s.cfg.ServerID, "nonce": nonce})
+}
+
+func verifiedLANPeer(r *http.Request) bool {
+	lan, ok := r.Context().Value(lanContextKey{}).(lanContext)
+	if !ok || lan.subnet == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.To4() != nil && lan.subnet.Contains(ip)
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
@@ -217,6 +265,10 @@ func (s *Server) handleAdminWS(w http.ResponseWriter, r *http.Request) {
 	s.hub.HandleAdmin(realtime.NewWSConn(conn), record.Identity)
 }
 func (s *Server) handleCameraWS(w http.ResponseWriter, r *http.Request) {
+	if len(s.cfg.CameraSecret) == 0 && !verifiedLANPeer(r) && !loopbackPeer(r) {
+		http.Error(w, "camera authentication required outside local network", http.StatusForbidden)
+		return
+	}
 	id := strings.TrimSpace(r.URL.Query().Get("cameraId"))
 	if id == "" {
 		id = strings.TrimSpace(r.URL.Query().Get("robotId"))
@@ -234,7 +286,46 @@ func (s *Server) handleCameraWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	s.hub.HandleCamera(realtime.NewWSConn(conn), id, name)
+	wrapped := realtime.NewWSConn(conn)
+	if len(s.cfg.CameraSecret) == 32 && !authenticateCamera(wrapped, id, s.cfg.CameraSecret) {
+		wrapped.Close(4003, "camera-auth-failed")
+		return
+	}
+	s.hub.HandleCamera(wrapped, id, name, verifiedLANPeer(r))
+}
+
+func loopbackPeer(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func authenticateCamera(conn *realtime.WSConn, id string, secret []byte) bool {
+	nonce, err := randomToken(16)
+	if err != nil || !conn.WriteJSON(map[string]any{"type": "camera_auth_challenge", "v": 2, "nonce": nonce}) {
+		return false
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer conn.SetReadDeadline(time.Time{})
+	var msg struct {
+		Type     string `json:"type"`
+		V        int    `json:"v"`
+		CameraID string `json:"cameraId"`
+		Proof    string `json:"proof"`
+	}
+	if err := conn.ReadJSON(&msg); err != nil || msg.Type != "camera_auth" || msg.V != 2 || msg.CameraID != id || strings.Contains(msg.Proof, "=") {
+		return false
+	}
+	proof, err := base64.RawURLEncoding.DecodeString(msg.Proof)
+	if err != nil || len(proof) != sha256.Size {
+		return false
+	}
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte(nonce + "\n" + id))
+	return hmac.Equal(proof, mac.Sum(nil))
 }
 
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {

@@ -1,7 +1,10 @@
 .env
 bin/
 .gocache/
+.go-config/
+.go-local/
 *.exe
 *.exe~
 *.log
+data/
 .DS_Store

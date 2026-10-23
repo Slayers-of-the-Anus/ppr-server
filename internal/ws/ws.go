@@ -82,6 +82,7 @@ func Upgrade(w http.ResponseWriter, r *http.Request) (*Conn, error) {
 }
 
 func (c *Conn) SetReadLimit(n int64)                 { c.readLimit = n }
+func (c *Conn) SetReadDeadline(t time.Time) error    { return c.conn.SetReadDeadline(t) }
 func (c *Conn) SetPongHandler(fn func(string) error) { c.pongHandler = fn }
 func (c *Conn) SetWriteDeadline(t time.Time) error   { return c.conn.SetWriteDeadline(t) }
 func (c *Conn) Close() error                         { return c.conn.Close() }

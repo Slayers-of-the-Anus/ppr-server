@@ -30,6 +30,8 @@ func (c *WSConn) ReadJSON(v any) error {
 	return c.conn.ReadJSON(v)
 }
 
+func (c *WSConn) SetReadDeadline(t time.Time) error { return c.conn.SetReadDeadline(t) }
+
 func (c *WSConn) WriteJSON(v any) bool {
 	if c == nil || c.closed.Load() {
 		return false

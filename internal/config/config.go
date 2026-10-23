@@ -2,8 +2,13 @@ package config
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +27,11 @@ type IceServer struct {
 
 type Config struct {
 	Port                    int
+	MainBind                string
+	LANBind                 string
+	PublicURL               string
+	CameraSecret            []byte
+	ServerID                string
 	Users                   []User
 	IceServers              []IceServer
 	EnableBrowserCameraTest bool
@@ -45,7 +55,10 @@ func Load() (Config, error) {
 	maxAngle := clamp(intEnv("SERVO_MAX_ANGLE", 180), minAngle+1, 360)
 
 	cfg := Config{
-		Port: intEnv("PORT", 8080),
+		Port:      intEnv("PORT", 8080),
+		MainBind:  env("PHONEPILOT_MAIN_BIND", "127.0.0.1"),
+		LANBind:   env("PHONEPILOT_LAN_BIND", "auto:8081"),
+		PublicURL: strings.TrimSpace(os.Getenv("PHONEPILOT_PUBLIC_URL")),
 		Users: []User{
 			{Username: env("ADMIN_LOGIN", "admin"), Password: env("ADMIN_PASSWORD", "ChangeMe123!")},
 			{Username: "Ivan", Password: env("IVAN_PASSWORD", "Ivan123!")},
@@ -69,6 +82,38 @@ func Load() (Config, error) {
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		return Config{}, fmt.Errorf("PORT must be between 1 and 65535")
 	}
+	mainIP := net.ParseIP(cfg.MainBind)
+	if mainIP == nil {
+		return Config{}, fmt.Errorf("PHONEPILOT_MAIN_BIND must be an IPv4 or IPv6 address")
+	}
+	secretText := strings.TrimSpace(os.Getenv("PHONEPILOT_CAMERA_SECRET_B64URL"))
+	if secretText != "" {
+		if strings.Contains(secretText, "=") {
+			return Config{}, fmt.Errorf("PHONEPILOT_CAMERA_SECRET_B64URL must be unpadded Base64URL")
+		}
+		var err error
+		cfg.CameraSecret, err = base64.RawURLEncoding.DecodeString(secretText)
+		if err != nil || len(cfg.CameraSecret) != 32 {
+			return Config{}, fmt.Errorf("PHONEPILOT_CAMERA_SECRET_B64URL must encode exactly 32 bytes")
+		}
+	}
+	if cfg.PublicURL != "" {
+		if !mainIP.IsLoopback() {
+			return Config{}, fmt.Errorf("public mode requires loopback PHONEPILOT_MAIN_BIND behind a restricted TLS reverse proxy")
+		}
+		u, err := url.Parse(cfg.PublicURL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") || net.ParseIP(u.Hostname()) != nil || strings.EqualFold(u.Hostname(), "localhost") {
+			return Config{}, fmt.Errorf("PHONEPILOT_PUBLIC_URL must be an external HTTPS origin")
+		}
+		if len(cfg.CameraSecret) != 32 {
+			return Config{}, fmt.Errorf("PHONEPILOT_PUBLIC_URL requires PHONEPILOT_CAMERA_SECRET_B64URL")
+		}
+	}
+	var err error
+	cfg.ServerID, err = loadServerID(env("PHONEPILOT_SERVER_ID_FILE", filepath.Join("data", "server-id")))
+	if err != nil {
+		return Config{}, err
+	}
 
 	stun := csv(env("STUN_URLS", "stun:stun.l.google.com:19302"))
 	if len(stun) > 0 {
@@ -84,6 +129,43 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func loadServerID(path string) (string, error) {
+	if b, err := os.ReadFile(path); err == nil {
+		id := strings.TrimSpace(string(b))
+		if len(id) == 36 && id[8] == '-' && id[13] == '-' && id[18] == '-' && id[23] == '-' && id[14] == '4' {
+			return id, nil
+		}
+		return "", fmt.Errorf("invalid serverId in %s", path)
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	id := fmt.Sprintf("%x-%x-%x-%x-%x", b[:4], b[4:6], b[6:8], b[8:10], b[10:])
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return "", err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if os.IsExist(err) {
+		return loadServerID(path)
+	}
+	if err != nil {
+		return "", err
+	}
+	if _, err = f.WriteString(id + "\n"); err != nil {
+		_ = f.Close()
+		return "", err
+	}
+	if err = f.Close(); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func loadDotEnv(path string) error {
